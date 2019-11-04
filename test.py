@@ -17,10 +17,10 @@ def script1(a, b):
 class Script1(EmbedShell):
     '''#!/bin/bash
        echo Script1 started
-       ls -1 /
        echo test.py
        echo test2.py
        exit 1
+       ls -1 /
     '''
     pass
 
