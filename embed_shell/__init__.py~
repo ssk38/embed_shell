@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import os
+import re
+import tempfile
+from pprint import pprint
+import subprocess
+import asyncio
+
+    
+def shell(function):
+    print(f'shell deco called')
+    print(function.__doc__)
+    eshell = EmbedShell()
+    eshell.set_script(function.__doc__)
+    eshell.name = function.__name__
+    def runshell(*args):
+        print(f'runshell {args}')
+        eshell.run(*args)
+    return runshell
+    
+        
+class EmbedShell:
+
+    def __init__(self, *args, name=None):
+        print(f"__init__ called")
+        self.script_string = None
+        self.args = []
+        self.pipe_children = [self]
+        self.rc = None
+        self.pipe_status = None
+
+        #import pdb; pdb.set_trace()
+        if self.__class__.__name__ != 'EmbedShell':
+            print(f"__init__ called from inherited class {self.__class__.__name__}")
+            self.set_script(self.__doc__)
+            self.set_args(*args)
+            if name:
+                self.name = name
+            else:
+                self.name = self.__class__.__name__
+        elif args:
+            print(f"__init__ called as {args}")
+            if len(args) > 1:
+                raise ValueError('EmbedShell accepts only one argument of string literal')
+            self.set_script('#!/bin/sh\n ' + args[0])
+            self.name = args[0].split()[0]
+
+    def _remove_base_indent(self, script):
+        lines = script.split('\n')
+        if len(lines) <= 1:
+            return script
+    
+        # Search the min indent line
+        get_indent = re.compile('(\s+)')
+        m = get_indent.match(lines[0])
+        if m:
+            # first line has indent, take it into account
+            topline_has_indent = True
+            min_indent = len(m.group(0))
+        else:
+            topline_has_indent = False
+            min_indent = 0xffff  # just large enough number
+        for line in lines[1:]:
+            m = get_indent.match(line[0])
+            if not m:
+                raise ValueError(f'Invalid indent at {line}')
+            indent = len(m.group(0))
+            if indent < min_indent:
+                min_indent = indent
+        # strip indent
+        if topline_has_indent:
+            lines[0] = lines[0][min_indent:]
+        for i in range(1, len(lines)):
+            lines[i] = lines[i][min_indent:]
+        return '\n'.join(lines)
+
+    def set_script(self, doc):
+        self.script_string = self._remove_base_indent(doc)
+
+    def set_args(self, *args):
+        if args:
+            self.args = list(map(str, list(args)))
+
+    def __ror__(self, other_eshell):
+        if not isinstance(other_eshell, EmbedShell):
+            raise ValueError("EmbedShell pipe accepts only string or EmbedShell")
+
+        other_eshell.pipe_children.append(self)
+        return other_eshell
+
+    def _popen(self, *args, stdout=None, stdin=None, stderr=None,
+               cwd=None, **kwargs):
+        fd, self.script_file = tempfile.mkstemp(prefix=f"{self.name}_")
+        print(f'writing script to {self.script_file}')
+        with open(self.script_file, 'w') as fp:
+            fp.write(self.script_string)
+        os.chmod(self.script_file, 0o500)
+        if args:
+            self.args = list(map(str, list(args)))
+
+        print(f'Running {self.script_file} {self.args}')
+        return subprocess.Popen([self.script_file] + self.args,
+                     universal_newlines=True,
+                     cwd=cwd,
+                     stdout=stdout,
+                     stdin=stdin,
+                     stderr=stderr,
+                     **kwargs)
+
+    async def _popen_aio(self, *args, stdout=None, stdin=None, stderr=None,
+               cwd=None, **kwargs):
+        fd, self.script_file = tempfile.mkstemp(prefix=f"{self.name}_")
+        print(f'writing script to {self.script_file}')
+        with open(self.script_file, 'w') as fp:
+            fp.write(self.script_string)
+        os.chmod(self.script_file, 0o500)
+        if args:
+            self.args = list(map(str, list(args)))
+
+        print(f'Running {self.script_file} {self.args}')
+        return await asyncio.create_subprocess_exec(
+            " ".join([self.script_file] + self.args),
+            stdin=stdin,
+            stdout=stdout,
+            stderr=stderr,
+            **kwargs)
+
+    async def popenall_aio(self, *args, **kwargs):
+        self.processes = []
+        prev_in = asyncio.subprocess.PIPE
+        for child in reversed(self.pipe_children):
+            p = await child._popen_aio(stdout=prev_in, stdin=asyncio.subprocess.PIPE, **kwargs)
+            setattr(p, "embedshell_name", child.name)
+            print(f"Popening({child.name})")
+            self.processes.insert(0, p)
+            prev_in = p.stdin
+        print([(p.embedshell_name, p.args) for p in self.processes])
+        return self.processes[0].stdin, self.processes[-1].stdout
+
+    def popenall(self, *args, **kwargs):
+        self.processes = []
+        prev_in = subprocess.PIPE
+        for child in reversed(self.pipe_children):
+            p = child._popen(stdout=prev_in, stdin=subprocess.PIPE, **kwargs)
+            setattr(p, "embedshell_name", child.name)
+            print(f"Popening({child.name})")
+            self.processes.insert(0, p)
+            prev_in = p.stdin
+        print([(p.embedshell_name, p.args) for p in self.processes])
+        return self.processes[0].stdin, self.processes[-1].stdout
+
+    def run_aio(self, *args, **kwargs):
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(self.popenall_aio(*args, **kwargs))
+        print(f"Calling {self.processes[-1].embedshell_name}.communicate()")    
+        outs = loop.run_until_complete(self.processes[-1].stdout.read())
+        print(outs)
+        loop.run_util_complete(
+            asyncio.gather([p.wait() for p in self.processes]))
+        for p in self.processes:
+            print(f"{p.embedshell_name}: rc={p.returncode}")
+        self.rc = self.processes[-1].returncode
+        self.pipe_status = [p.returncode for p in self.processes]
+        return outs
+
+    def run(self, *args, **kwargs):
+        self.popenall(*args, **kwargs)
+        print(f"Calling {self.processes[-1].embedshell_name}.communicate()")
+        outs = self.processes[-1].stdout.read()
+        print(outs)
+        for p in self.processes:
+            p.wait()
+            print(f"{p.embedshell_name}: rc={p.returncode}")
+        self.rc = self.processes[-1].returncode
+        self.pipe_status = [p.returncode for p in self.processes]
+        return outs
+
+
