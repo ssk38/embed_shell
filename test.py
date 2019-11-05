@@ -19,8 +19,10 @@ class Script1(EmbedShell):
        echo Script1 started
        echo test.py
        echo test2.py
-       exit 1
-       ls -1 /
+       for ((i=0; i<1024; i++)); do
+           echo "************i=$i*************"
+           ls -1 /
+       done
     '''
     pass
 
@@ -37,13 +39,30 @@ class Script2(EmbedShell):
 
 
 if __name__ == '__main__':
-    # import logging
-    # logging.basicConfig(level=getattr(logging, 'INFO', None))
-    outs, errs = script1(1, 2)
-    print("outs is %s" % outs)
-    print("errs is %s" % errs)
+    #import logging
+    #logging.basicConfig(level=getattr(logging, 'INFO', None))
+    outs, errs, rcs = script1(1, 2)
+    print("outs are %s" % outs)
+    #print("errs are %s" % errs)
+    print("rcs are %s" % rcs)
+    scripts = Script1() | Script2()
+    print('returned object = %s' % scripts.name)
+    outs, errs, rcs = scripts.run()
+    print("outs are %s" % outs)
+    #print("errs are %s" % errs)
+    print("rcs are %s" % rcs)
+    sys.exit(0)
     scripts = Script1() | Script2() | EmbedShell('grep test')
     print('returned object = %s' % scripts.name)
-    outs, errs = scripts.run()
-    print("outs is %s" % outs)
-    print("errs is %s" % errs)
+    outs, errs, rcs = scripts.run()
+    print("outs are %s" % outs)
+    #print("errs are %s" % errs)
+    print("rcs are %s" % rcs)
+
+    scripts = Script1() | Script2() | EmbedShell('tail -1')
+    print('returned object = %s' % scripts.name)
+    outs, errs, rcs = scripts.run()
+    print("outs are %s" % outs)
+    #print("errs are %s" % errs)
+    print("rcs are %s" % rcs)
+

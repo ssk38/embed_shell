@@ -7,7 +7,7 @@ import re
 import signal
 import subprocess
 import tempfile
-
+from functools import reduce
 
 def shell(function):
     print(f'shell deco called')
@@ -131,6 +131,7 @@ class EmbedShell:
             logging.info(f"Popening({child.name})")
             self.processes.insert(0, p)
             prev_in = p.stdin
+        
         logging.info([(p.embedshell_name, p.args) for p in self.processes])
         return self.processes[0].stdin, self.processes[-1].stdout
 
@@ -146,30 +147,63 @@ class EmbedShell:
 
         outs = ""
         errs = ""
-        # TODO: Output must smaller than bueffer, or we hangs here
+        # TODO: Output must smaller than buffer, otherwise we hangs here
         #       because no one eats stdout PIPE of last process.
-        pfirst.wait()
         logging.info(f'{pfirst.embedshell_name} finished')
         if pfirst == plast:
             outs, errs = plast.communicate(timeout=1)
         else:
-            # First process finished, kill children by hand
-            for p in self.processes[1:]:
-                logging.info(f'polling {p.embedshell_name}')
-                if p.poll() is None:
-                    # This process is alive, kill SIGPIPE
-                    logging.info(f'kill {p.embedshell_name}')
-                    p.send_signal(signal.SIGPIPE)
+            finished_process = list(map(lambda a: a is None, self.processes))
 
-                _outs, _errs = p.communicate(timeout=1)
-                errs += _errs
-                outs = _outs
-                p.wait(timeout=1)
-                logging.info(f'{p.embedshell_name} finished')
+            while True:
+                for i in range(len(self.processes)):
+                    if finished_process[i]:
+                        continue
+                    p = self.processes[i]
+                    logging.info(f'polling {p.embedshell_name}')
+                    #if p.poll() is None:
+                    #    # This process is alive, kill SIGPIPE
+                    #    logging.info(f'kill {p.embedshell_name}')
+                    #    p.send_signal(signal.SIGPIPE)
 
+                    try:
+                        _outs, _errs = p.communicate(timeout=1)
+                        logging.info(f"{p.embedshell_name} finished. outs={_outs}, errs={_errs}")
+                        outs = _outs
+                        errs += _errs
+                    except:
+                        import traceback
+                        traceback.print_exc()
+
+                    if p.poll() is not None:
+                        p.wait(timeout=1)
+                        '''
+                        pipes are used by forked children, so we
+                        don't need it.
+                        But we MUST close it because keeping it open
+                        prevents the termination behaviour
+                        (SIGPIPE).
+                        If we keep it open, when the one side
+                        of process finished, the other side
+                        hungs keeping wait for next data
+                        without recieving SIGPIPE.
+                        '''
+                        if p.stdout:
+                            p.stdout.close()
+                        if p.stderr:
+                            p.stderr.close()
+                        if p.stdin:
+                            p.stdin.close()
+                        finished_process[i] = True
+                    logging.info(f'{p.embedshell_name} finished')
+
+                if reduce(lambda a,b: a and b, [p.poll() is not None for p in self.processes], True):
+                    # all process finished.
+                    break
+                print([p.poll() is not None for p in self.processes])
         logging.info(outs)
         logging.info(errs)
 
         self.rc = plast.returncode
         self.pipe_status = [p.returncode for p in self.processes]
-        return outs, errs
+        return outs, errs, self.pipe_status
